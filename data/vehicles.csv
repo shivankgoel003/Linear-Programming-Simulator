@@ -1,0 +1,7 @@
+vehicle_id,arrival_slot,departure_slot,initial_soc,target_soc,pmax_kw,battery_capacity_kwh,charging_efficiency_eta
+Bus-01,0,40,0.4,0.85,50,300,0.9
+Bus-02,4,44,0.55,0.9,50,300,0.9
+Bus-03,16,72,0.3,0.8,35,320,0.92
+Bus-04,24,80,0.2,0.75,22,280,0.9
+Staff-01,28,64,0.5,0.8,11,75,0.88
+Staff-02,32,68,0.35,0.7,11,75,0.88
