@@ -21,6 +21,7 @@ def solve_lp_energy_only(
     vehicles: pd.DataFrame,
     site: pd.DataFrame,
     dt_minutes: int = 15,
+    peak_weight: float = 1.0,
     solver_name: str | None = None,
 ) -> SolveResult:
     """
@@ -83,8 +84,11 @@ def solve_lp_energy_only(
 
     # Objective: minimize TOU energy cost
     ev_total_kw = cp.sum(P, axis=0)
+    peak_ev = cp.Variable(nonneg=True)
+    constraints.append(ev_total_kw <= peak_ev)
     energy_cost = cp.sum(cp.multiply(ev_total_kw * dt_hours, price))
-    prob = cp.Problem(cp.Minimize(energy_cost), constraints)
+    obj = cp.Minimize(energy_cost + peak_weight * peak_ev)
+    prob = cp.Problem(obj, constraints)
 
     # Solver selection
     if solver_name is None:
@@ -131,6 +135,8 @@ def solve_lp_energy_only(
         "peak_ev_kw": float(out["ev_total_kw"].max()),
         "peak_site_kw": float(out["site_total_kw"].max()),
         "feasible": feasible,
+        "peak_ev_kw_model": float(peak_ev.value) if feasible and peak_ev.value is not None else None,
+        "peak_weight": peak_weight,
     }
 
     return SolveResult(feasible=feasible, schedule=out, summary=summary)
