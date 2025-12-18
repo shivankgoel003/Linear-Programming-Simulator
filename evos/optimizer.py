@@ -2,6 +2,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from .baseline import run_baseline_dumb
+
 
 import numpy as np
 import pandas as pd
@@ -21,7 +23,8 @@ def solve_lp_energy_only(
     vehicles: pd.DataFrame,
     site: pd.DataFrame,
     dt_minutes: int = 15,
-    peak_weight: float = 1.0,
+    # choosing demand_charge_per_kw: float = 15.0 as placeholder
+    demand_charge_per_kw: float = 15.0, # demand charge means how many dollars we pay per kw of peak power usage
     solver_name: str | None = None,
 ) -> SolveResult:
     """
@@ -82,13 +85,23 @@ def solve_lp_energy_only(
         d = max(0, min(T, int(dep[i])))
         constraints.append(cp.sum(P[i, a:d]) * dt_hours * eta[i] >= req_batt_kwh[i])
 
-    # Objective: minimize TOU energy cost
+
+    # Objective: minimize energy cost + demand charge (peak)
     ev_total_kw = cp.sum(P, axis=0)
-    peak_ev = cp.Variable(nonneg=True)
-    constraints.append(ev_total_kw <= peak_ev)
+    site_total_kw = ev_total_kw + building  
+
+    # Peak variable z (kW)
+    peak_site = cp.Variable(nonneg=True)
+    constraints.append(site_total_kw <= peak_site)  
+
+    # Energy cost ($)
     energy_cost = cp.sum(cp.multiply(ev_total_kw * dt_hours, price))
-    obj = cp.Minimize(energy_cost + peak_weight * peak_ev)
-    prob = cp.Problem(obj, constraints)
+
+    # Demand charge ($) for the period
+    demand_cost = demand_charge_per_kw * peak_site
+
+    prob = cp.Problem(cp.Minimize(energy_cost + demand_cost), constraints)
+
 
     # Solver selection
     if solver_name is None:
@@ -127,17 +140,31 @@ def solve_lp_energy_only(
         out[f"{vid}_soc"] = soc[1:]  # align SOC to end of slot
 
     realized_energy_cost = float(np.sum(out["ev_total_kw"].to_numpy() * dt_hours * price))
+
+    realized_peak_ev_kw   = float(out["ev_total_kw"].max())
+    realized_peak_site_kw = float(out["site_total_kw"].max())
+
+    # If your demand charge is billed on TOTAL site demand:
+    realized_demand_cost = float(demand_charge_per_kw * realized_peak_site_kw)
+    realized_total_cost  = float(realized_energy_cost + realized_demand_cost)
+
     summary = {
-        "status": prob.status,
-        "solver": solver_name,
-        "dt_minutes": dt_minutes,
-        "energy_cost_$": realized_energy_cost,
-        "peak_ev_kw": float(out["ev_total_kw"].max()),
-        "peak_site_kw": float(out["site_total_kw"].max()),
-        "feasible": feasible,
-        "peak_ev_kw_model": float(peak_ev.value) if feasible and peak_ev.value is not None else None,
-        "peak_weight": peak_weight,
-    }
+    "status": prob.status,
+    "solver": solver_name,
+    "dt_minutes": dt_minutes,
+
+    "energy_cost_$": realized_energy_cost,
+
+    "peak_ev_kw": realized_peak_ev_kw,
+    "peak_site_kw": realized_peak_site_kw,
+
+    "demand_charge_per_kw_$": float(demand_charge_per_kw),
+    "demand_cost_$": realized_demand_cost,
+    "total_cost_$": realized_total_cost,
+
+    "peak_site_kw_model": float(peak_site.value) if feasible and peak_site.value is not None else None,
+    "feasible": feasible,
+}
 
     return SolveResult(feasible=feasible, schedule=out, summary=summary)
 
@@ -170,11 +197,29 @@ def main():
         "contract_limit_kw": site_series.contract_limit_kw.values,
     })
 
-    res = solve_lp_energy_only(vehicles, site_df, dt_minutes=15)
+    # 1. Baseline (truly dumb: ignore site limit)
+    base = run_baseline_dumb(
+    vehicles, site_df, dt_minutes=15,
+    respect_site_limit=False,
+    demand_charge_per_kw=15.0)
+
+    # 2. Optimized
+    res = solve_lp_energy_only(vehicles, site_df, dt_minutes=15,
+    demand_charge_per_kw=15.0)
 
     print("\n=== Solve Summary ===")
     for k, v in res.summary.items():
         print(f"{k}: {v}")
+    
+  
+    print("\n=== Baseline Summary (Dumb Charging) ===")
+    for k, v in base.summary.items():
+        print(f"{k}: {v}")
+
+    print("\n=== Optimized Summary (EVGrid OS) ===")
+    for k, v in res.summary.items():
+        print(f"{k}: {v}")
+
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = root / "runs" / ts
@@ -190,6 +235,11 @@ def main():
         print(f"Saved: {out_dir / 'site_power.png'}")
     except Exception as e:
         print(f"(Plot skipped) {e}")
+    
+    base.schedule.to_csv(out_dir / "baseline_schedule.csv", index=False)
+    res.schedule.to_csv(out_dir / "optimized_schedule.csv", index=False)
+    print(f"Saved: {out_dir / 'baseline_schedule.csv'}")
+    print(f"Saved: {out_dir / 'optimized_schedule.csv'}")
 
 
 if __name__ == "__main__":
